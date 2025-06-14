@@ -1,9 +1,5 @@
-beautifulsoup4==4.13.4
-fastapi==0.115.12
-numpy==2.3.0
-openai==1.86.0
-playwright==1.52.0
-pydantic==2.11.7
-Requests==2.32.4
-scikit_learn==1.7.0
-sentence_transformers==4.1.0
+fastapi
+uvicorn
+openai
+sentence-transformers
+
