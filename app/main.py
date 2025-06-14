@@ -1,83 +1,60 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
-import json
+from openai import OpenAI
 import os
-import openai
-
-# Load data
-with open("data/course.json", "r", encoding="utf-8") as f:
-    course_data = json.load(f)
-
-with open("data/discourse.json", "r", encoding="utf-8") as f:
-    discourse_data = json.load(f)
-
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+import json
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 
 app = FastAPI()
 
-class Query(BaseModel):
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"))
+
+# Load data
+with open("course.json") as f:
+    course_data = json.load(f)
+
+with open("discourse.json") as f:
+    discourse_data = json.load(f)
+
+# Flatten the text
+course_chunks = [section["content"] for section in course_data if section.get("content")]
+discourse_chunks = [post["content"] for post in discourse_data if post.get("content")]
+
+all_chunks = course_chunks + discourse_chunks
+
+# Embedder
+model = SentenceTransformer("all-MiniLM-L6-v2")
+chunk_embeddings = model.encode(all_chunks, convert_to_tensor=True)
+
+class Question(BaseModel):
     question: str
-    image: Optional[str] = None
 
 @app.post("/api/")
-async def answer_question(query: Query):
-    context_snippets = get_relevant_context(query.question)
-
-    system_prompt = "You are a helpful Teaching Assistant for the Tools in Data Science course at IIT Madras. Answer based on the course and discussion forum content."
-
-    full_prompt = system_prompt + "\n\nContext:\n" + context_snippets + f"\n\nQuestion: {query.question}\n\nAnswer:"
-
+async def answer_question(question: Question):
     try:
+        q_embedding = model.encode(question.question, convert_to_tensor=True)
+        similarities = cosine_similarity([q_embedding], chunk_embeddings)[0]
+        top_k = 5
+        top_indices = similarities.argsort()[-top_k:][::-1]
+        retrieved_chunks = "\n".join([all_chunks[i] for i in top_indices])
+
+        prompt = f"""You are a helpful TA for the TDS course.
+
+Answer the following question using only the course content and discussion forum posts below.
+
+Course content and posts:
+{retrieved_chunks}
+
+Question: {question.question}
+Answer:"""
+
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_prompt}
-            ]
+            model="openrouter/openai/gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
         )
-        answer_text = response.choices[0].message.content
+
+        return {"answer": response.choices[0].message.content.strip()}
     except Exception as e:
-        return {"error": str(e)}
-
-    related_links = extract_links(context_snippets)
-
-    return {
-        "answer": answer_text.strip(),
-        "links": related_links
-    }
-
-def get_relevant_context(question):
-    matches = []
-    keywords = question.lower().split()
-
-    for topic in discourse_data:
-        score = sum(kw in topic["title"].lower() for kw in keywords)
-        if score > 0:
-            posts = " ".join(topic["posts"])
-            matches.append((score, topic["title"], posts, topic["url"]))
-
-    for topic in course_data:
-        text = topic.get("text", "") + " " + topic.get("title", "")
-        score = sum(kw in text.lower() for kw in keywords)
-        if score > 0:
-            matches.append((score, topic["title"], text, ""))
-
-    matches.sort(reverse=True)
-    top_matches = matches[:3]
-
-    context = ""
-    for score, title, text, url in top_matches:
-        context += f"\nTITLE: {title}\nCONTENT: {text[:1000]}\nLINK: {url}\n"
-
-    return context
-
-def extract_links(context):
-    links = []
-    for line in context.splitlines():
-        if "https://" in line:
-            links.append({
-                "url": line.strip().replace("LINK: ", ""),
-                "text": "Related link"
-            })
-    return links
+        raise HTTPException(status_code=500, detail=str(e))
